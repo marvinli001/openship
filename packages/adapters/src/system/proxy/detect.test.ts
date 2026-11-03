@@ -4,6 +4,7 @@ import {
   detectEdgeContainer,
   freeEdgeTargets,
   invalidateEdgeContainer,
+  isOurEdgeContainer,
   probeEdge,
   resolveOurEdgeContainer,
   stopTargetsForStatus,
@@ -384,6 +385,59 @@ describe("freeEdgeTargets", () => {
   });
 });
 
+describe("edge container identity", () => {
+  test.each([
+    ["openship-edge", "custom-edge:latest"],
+    ["my-proxy", "ghcr.io/oblien/openship-edge:0.9.5"],
+    ["my-proxy", "registry.example:5000/team/openship-edge:0.9.5"],
+    ["my-proxy", "ghcr.io/oblien/openship-edge@sha256:abc123"],
+    ["my-proxy", "openship-edge"],
+  ])("recognizes %s running %s", (name, image) => {
+    expect(isOurEdgeContainer(name, image)).toBe(true);
+  });
+
+  test.each([
+    ["openship-edgeweir-console", "b275be234bcd"],
+    ["openship-edgeweir-postgres", "postgres:17"],
+    ["openship-edge-backup", "nginx:latest"],
+    ["my-openship-edge", "nginx:latest"],
+    ["my-proxy", "ghcr.io/team/openship-edgeweir:latest"],
+    ["my-proxy", "ghcr.io/openship-edge/console:latest"],
+    ["my-proxy", "openship-edge:5000/console:latest"],
+  ])("does not identify %s running %s as the edge", (name, image) => {
+    expect(isOurEdgeContainer(name, image)).toBe(false);
+  });
+
+  test("resolves the exact edge name after a newer app with the same prefix", async () => {
+    const executor = makeExecutor([
+      ["docker ps --filter name=openship-edge", "openship-edgeweir-console\nopenship-edge"],
+    ]);
+    expect(await resolveOurEdgeContainer(executor)).toBe("openship-edge");
+  });
+
+  test("reports no running edge when only similarly named apps exist", async () => {
+    const executor = makeExecutor([
+      ["docker ps --filter name=openship-edge", "openship-edgeweir-console"],
+      ["docker ps --format", "openship-edgeweir-console\tb275be234bcd"],
+    ]);
+    expect(await resolveOurEdgeContainer(executor)).toBeNull();
+  });
+
+  test("resolves a renamed edge by image after rejecting similarly named apps", async () => {
+    const executor = makeExecutor([
+      ["docker ps --filter name=openship-edge", "openship-edgeweir-console"],
+      [
+        "docker ps --format",
+        [
+          "openship-edgeweir-console\tb275be234bcd",
+          "my-proxy\tghcr.io/oblien/openship-edge:0.9.5",
+        ].join("\n"),
+      ],
+    ]);
+    expect(await resolveOurEdgeContainer(executor)).toBe("my-proxy");
+  });
+});
+
 /**
  * The probe is 1–2 `docker ps` shell-outs — over SSH for a remote server — and it
  * sits on read paths that run constantly (every platform construction, every
@@ -499,6 +553,20 @@ describe("detectEdgeContainer", () => {
     expect(
       await detectEdgeContainer(psa("openship-edge\tghcr.io/oblien/openship-edge:0.4.0\texited")),
     ).toMatchObject({ name: "openship-edge", running: false, exists: true });
+  });
+
+  test("reads the edge version rather than a newer app with the same name prefix", async () => {
+    const inventory = [
+      "openship-edgeweir-console\tb275be234bcd\trunning",
+      "openship-edgeweir-postgres\tpostgres:17\trunning",
+      "openship-edge\tghcr.io/oblien/openship-edge:0.9.5\trunning",
+    ].join("\n");
+    expect(await detectEdgeContainer(psa(inventory))).toEqual({
+      name: "openship-edge",
+      image: "ghcr.io/oblien/openship-edge:0.9.5",
+      running: true,
+      exists: true,
+    });
   });
 
   test("matches a container renamed off the default name but running our image", async () => {
